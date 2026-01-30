@@ -1,0 +1,16 @@
+sqlalchemy==2.0.28
+asyncpg==0.29.0
+pydantic>=2.4.1,<2.6
+aiogram==3.4.1
+pydantic-settings==2.2.1
+minio==7.2.5
+pandas==2.2.1
+openpyxl==3.1.2
+matplotlib==3.8.3
+langchain==0.1.12
+langchain-community==0.0.28
+langchain-core==0.1.32
+loguru==0.7.2
+psycopg2-binary==2.9.9
+langgraph==0.0.26
+xlsxwriter==3.1.9

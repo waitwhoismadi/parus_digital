@@ -1,0 +1,51 @@
+# --- Security (ВАЖНО) ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Virtual Environment ---
+venv/
+env/
+.venv/
+
+# --- Logs ---
+*.log
+parus.log
+
+# --- Docker & Data Volumes (Исключаем базы данных) ---
+# Данные MinIO (файлы Excel)
+minio_data/
+# Данные Ollama (сама модель)
+ollama_data/
+# Если вдруг решите поднять Postgres в докере
+pg_data/
+
+# --- IDE Settings ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Local Testing Files ---
+# Исключаем локальные Excel файлы, на которых вы тестируете,
+# чтобы случайно не закоммитить конфиденциальные данные
+*.xlsx
+*.csv
+*.xls
+
+# --- Temporary Images ---
+# Если графики сохраняются на диск перед отправкой
+chart.png
+*.png
+*.jpg

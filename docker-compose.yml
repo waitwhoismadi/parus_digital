@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: parus_minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      # ВАЖНО: Мы передаем значения из .env в переменные MinIO
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    volumes:
+      - ./minio_data:/data
+    networks:
+      - parus_net
+      
+  ollama:
+    image: ollama/ollama:latest
+    container_name: parus_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - parus_net
+
+networks:
+  parus_net:
+    driver: bridge
