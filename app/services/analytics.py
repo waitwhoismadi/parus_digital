@@ -1,6 +1,6 @@
 import pandas as pd
 import matplotlib
-# Используем неинтерактивный бэкенд, чтобы не зависало на сервере
+# Устанавливаем бэкенд Agg СРАЗУ, до импорта pyplot. Это критично для Docker.
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import io
@@ -30,16 +30,12 @@ class PythonExecutorService:
         self.max_retries = 3
 
     async def run_analysis(self, user_query: str) -> AnalyticsResponse:
-        """Главный метод: от запроса до результата."""
+        """Главный метод"""
         files_meta = await self._get_relevant_files_metadata()
         
         if not files_meta:
-            return AnalyticsResponse(
-                answer_text="Нет доступных файлов для анализа. Загрузите Excel.", 
-                executed_code=""
-            )
+            return AnalyticsResponse(answer_text="Нет файлов. Загрузите Excel.", executed_code="")
 
-        # Загрузка данных
         dfs = {}
         schemas_desc = []
         
@@ -54,42 +50,35 @@ class PythonExecutorService:
                 safe_name = f"df_{meta.id}"
                 dfs[safe_name] = df
                 
-                # --- ИСПРАВЛЕНИЕ: Красивое форматирование схемы ---
-                # Превращаем JSON {"\u04...": "..."} в читаемый текст
+                # Формирование описания
                 readable_schema = []
                 if isinstance(meta.columns_schema, dict):
-                    for col_name, col_desc in meta.columns_schema.items():
-                        # col_name и col_desc автоматически станут нормальными строками в Python
-                        readable_schema.append(f"- Колонка '{col_name}': {col_desc}")
+                    for col, desc in meta.columns_schema.items():
+                        readable_schema.append(f"   - Column '{col}': {desc}")
                 
-                schema_text = "\n".join(readable_schema)
-                # --------------------------------------------------
-
-                # Добавляем названия колонок явно, чтобы модель точно знала, как к ним обращаться
-                columns_list = ", ".join([f"'{c}'" for c in df.columns])
+                first_col_name = df.columns[0]
+                first_col_values = df[first_col_name].astype(str).head(5).tolist()
                 
-                schemas_desc.append(
-                    f"DATASET NAME: '{safe_name}' (Original File: {meta.filename})\n"
-                    f"ACTUAL PYTHON COLUMN NAMES: [{columns_list}]\n"
-                    f"COLUMN MEANINGS:\n{schema_text}\n"
+                schema_text_block = (
+                    f"DATASET: variable '{safe_name}' (Filename: {meta.filename})\n"
+                    f"ALL COLUMN NAMES: {list(df.columns)}\n"
+                    f"COLUMN MEANINGS:\n" + "\n".join(readable_schema) + "\n"
+                    f"SAMPLE VALUES IN FIRST COLUMN ('{first_col_name}'): {first_col_values}...\n"
                 )
+                schemas_desc.append(schema_text_block)
             except Exception as e:
-                logger.error(f"Failed to load file {meta.filename}: {e}")
+                logger.error(f"Error loading {meta.filename}: {e}")
 
         if not dfs:
-            return AnalyticsResponse(answer_text="Ошибка загрузки данных.", executed_code="", is_error=True)
+            return AnalyticsResponse(answer_text="Ошибка данных", executed_code="", is_error=True)
 
-        # Self-healing loop
         last_error = None
         code = ""
         
         for attempt in range(self.max_retries):
             try:
-                logger.info(f"Generation attempt {attempt + 1}")
-                code = await self._generate_code(user_query, schemas_desc, last_error, previous_code=code)
-                
-                logger.debug(f"Executing code:\n{code}")
-
+                code = await self._generate_code(user_query, schemas_desc, last_error)
+                logger.info(f"--- ATTEMPT {attempt+1} GENERATED CODE ---\n{code}\n----------------")
                 result, plot_b64 = self._execute_safe(code, dfs)
                 
                 return AnalyticsResponse(
@@ -97,15 +86,13 @@ class PythonExecutorService:
                     plot_base64=plot_b64,
                     executed_code=code
                 )
-                
             except Exception as e:
-                # Добавляем Traceback, чтобы модель видела, где именно она ошиблась
                 last_error = f"{type(e).__name__}: {str(e)}\nTraceback: {traceback.format_exc()}"
-                logger.warning(f"Code execution failed: {e}")
+                logger.warning(f"Attempt {attempt+1} failed: {last_error}")
 
         return AnalyticsResponse(
-            answer_text=f"Не удалось выполнить анализ. Ошибка: {last_error}",
-            executed_code=code,
+            answer_text=f"Не удалось. Ошибка: {last_error}", 
+            executed_code=code, 
             is_error=True
         )
 
@@ -116,63 +103,95 @@ class PythonExecutorService:
     async def _generate_code(self, query: str, schemas: List[str], error: str = None, previous_code: str = "") -> str:
         
         system_prompt = """
-            You are a Python Data Analyst. Write Python code using Pandas to answer the user's question.
-            
-            AVAILABLE DATAFRAMES:
-            {schemas}
+        You are a Senior Python Data Analyst.
+        
+        CONTEXT DATA:
+        {schemas}
 
-            RULES:
-            1. Use ONLY `pandas` and `matplotlib.pyplot`.
-            2. Assign the text answer (string or number) to the variable `final_result`.
-            3. DO NOT use `print()`. Use `final_result = ...`
-            4. COLUMN NAMES: Use exact column names from the "ACTUAL PYTHON COLUMN NAMES" list provided above.
-            5. FILTERING: If the user asks for a specific item (e.g. "Mountain mass"), look for it in the text columns using string partial matching.
-            Example: `df[df['ColumnName'].astype(str).str.contains('text', case=False, na=False)]`
-            6. PLOTTING: If a plot is needed, create it using `plt.plot()` or `df.plot()`. DO NOT call `plt.show()`.
-            
-            Output JUST the executable Python code. No markdown.
-            """
+        USER REQUEST: {input}
+
+        TASK: Write Python code (Pandas + Matplotlib) to fulfill the request.
         
-        user_msg = f"User Question: {query}"
+        CRITICAL RULES (FOLLOW OR CODE WILL CRASH):
         
+        1. VARIABLE: 
+           - Start with `df = df_X.copy()` (use the correct variable name).
+           - Initialize `final_result = "Data not found"`.
+        
+        2. DATA CLEANING: 
+           - Convert ONLY value columns (Months, Quarters) to numeric: 
+             `df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)`
+           - NEVER touch the first column (Text Description).
+
+        3. FILTERING:
+           - Filter row: `filtered = df[df['NameCol'].astype(str).str.contains('Term', case=False, na=False)]`
+           - ALWAYS check `if not filtered.empty:`
+           - If empty, keep `final_result = "Data not found"`.
+
+        4. GRAPHICS / PLOTTING (STRICT):
+           - DECIDE: Does the user ask for "chart", "plot", "graph" (график)?
+           - YES -> DRAW:
+             a) Extract X (names) and Y (values) explicitly.
+                Example: 
+                `months = ['Январь', 'Февраль', 'Март']`
+                `values = filtered.iloc[0][months].values`
+             b) Plot: `plt.plot(months, values)` or `plt.bar(months, values)`.
+             c) Add title: `plt.title('...')`.
+             d) Set `final_result = "График построен."`
+             e) FORBIDDEN: NEVER write `plt.show()`. NEVER write `plt.savefig()`.
+           - NO -> CALCULATE:
+             a) Just calculate the number.
+             b) Set `final_result = calculated_value`.
+
+        5. OUTPUT:
+           - `final_result` must be a single string or number.
+           - NO `print()` statements.
+
+        RETURN ONLY CLEAN PYTHON CODE.
+        """
+        
+        msg = query
         if error:
-            user_msg += f"\n\nPrevious code failed with error:\n{error}\n\nPlease fix the code."
+            msg += f"\n\nPREVIOUS ERROR: {error}\nHINT: Remove plt.show()! Check your column names."
 
         prompt = PromptTemplate(
-            template=f"{system_prompt}\n\n{{input}}",
+            template=system_prompt,
             input_variables=["input", "schemas"]
         )
         
         chain = prompt | self.llm
-        response = await chain.ainvoke({"input": user_msg, "schemas": "\n".join(schemas)})
         
+        logger.info(f"--- SENDING PROMPT TO LLM ---\nQuestion: {msg}\n----------------")
+        
+        response = await chain.ainvoke({"input": msg, "schemas": "\n".join(schemas)})
         return response.content.replace("```python", "").replace("```", "").strip()
 
     def _execute_safe(self, code: str, dfs: Dict[str, pd.DataFrame]):
-        # 1. Очищаем старые графики, но НЕ создаем новую фигуру
+        # 1. Очищаем все прошлые графики
         plt.close('all')
         
         local_scope = {"pd": pd, "plt": plt}
         local_scope.update(dfs)
         
-        # 2. Исполнение
+        # 2. Исполняем код
         exec(code, {}, local_scope)
         
-        # 3. Извлекаем результат
-        final_result = local_scope.get("final_result")
+        # 3. Достаем результат
+        final_result = local_scope.get("final_result", "Код выполнен.")
         
-        # Если final_result равен None (или не задан), пробуем найти хоть что-то
-        if final_result is None:
-             final_result = "Код выполнен успешно, но переменная 'final_result' пустая. Проверьте график."
-
-        # 4. Проверяем, был ли нарисован график
+        # 4. Проверяем наличие графиков
         plot_b64 = None
-        # get_fignums() вернет список номеров фигур, если они были созданы кодом
+        # get_fignums() вернет список номеров фигур, если plt.plot() был вызван
         if plt.get_fignums():
             buf = io.BytesIO()
-            plt.savefig(buf, format='png', bbox_inches='tight')
+            # Сохраняем текущую фигуру
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
             buf.seek(0)
             plot_b64 = base64.b64encode(buf.read()).decode('utf-8')
             plt.close('all')
             
+            # Если график есть, переписываем текст ответа, чтобы не пугать пользователя массивами
+            if not isinstance(final_result, str):
+                final_result = "График построен."
+        
         return final_result, plot_b64
