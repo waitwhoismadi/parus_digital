@@ -10,9 +10,8 @@ from loguru import logger
 class RAGService:
     def __init__(self, session: AsyncSession):
         self.session = session
-        # Адрес Ollama для получения эмбеддингов
         self.ollama_url = f"{settings.OLLAMA_BASE_URL}/api/embeddings"
-        self.model = "nomic-embed-text" # Модель, которую мы скачали
+        self.model = "nomic-embed-text" 
 
     async def get_embedding(self, text: str) -> list[float]:
         """Превращает текст в список из 768 чисел"""
@@ -35,13 +34,12 @@ class RAGService:
         result = []
         for i, page in enumerate(reader.pages):
             text = page.extract_text()
-            if text and len(text.strip()) > 50: # Игнорируем пустые страницы
+            if text and len(text.strip()) > 50: 
                 result.append((i + 1, text))
         return result
 
     def split_text(self, text: str, chunk_size: int = 500) -> list[str]:
         """Разбивает длинный текст на куски по ~500 символов"""
-        # Это примитивный сплиттер. В идеале использовать RecursiveCharacterTextSplitter из LangChain
         words = text.split()
         chunks = []
         current_chunk = []
