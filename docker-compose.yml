@@ -1,6 +1,7 @@
 version: '3.8'
 
 services:
+  # --- НАШ БОТ ---
   bot:
     build: .
     container_name: parus_bot
@@ -8,20 +9,35 @@ services:
     env_file:
       - .env
     environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       - MINIO_ENDPOINT=minio:9000
       - OLLAMA_BASE_URL=http://ollama:11434
-      - DATABASE_URL=postgresql+asyncpg://postgres:${DATABASE_PASSWORD}@host.docker.internal:5432/parus_db
-    volumes:
-      - .:/app
-      - /app/venv
     depends_on:
+      - db
       - minio
       - ollama
-    extra_hosts:
-      - "host.docker.internal:host-gateway" 
     networks:
       - parus_net
 
+  # --- БАЗА ДАННЫХ (с pgvector) ---
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: parus_db
+    restart: always
+    ports:
+      # Внешний порт 5433 (чтобы не мешать локальному Postgres), внутренний 5432
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      # Данные базы будут лежать в папке pg_data в корне проекта
+      - ./pg_data:/var/lib/postgresql/data
+    networks:
+      - parus_net
+
+  # --- ФАЙЛОВОЕ ХРАНИЛИЩЕ ---
   minio:
     image: minio/minio:latest
     container_name: parus_minio
@@ -37,6 +53,7 @@ services:
     networks:
       - parus_net
 
+  # --- НЕЙРОСЕТЬ ---
   ollama:
     image: ollama/ollama:latest
     container_name: parus_ollama
