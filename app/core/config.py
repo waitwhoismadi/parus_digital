@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "llama3"
 
     class Config:
-        env_file = ".env"
+        env_file = ".env",
+        extra = "ignore"
 
 settings = Settings()

@@ -1,6 +1,27 @@
 version: '3.8'
 
 services:
+  bot:
+    build: .
+    container_name: parus_bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - MINIO_ENDPOINT=minio:9000
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - DATABASE_URL=postgresql+asyncpg://postgres:${DATABASE_PASSWORD}@host.docker.internal:5432/parus_db
+    volumes:
+      - .:/app
+      - /app/venv
+    depends_on:
+      - minio
+      - ollama
+    extra_hosts:
+      - "host.docker.internal:host-gateway" 
+    networks:
+      - parus_net
+
   minio:
     image: minio/minio:latest
     container_name: parus_minio
@@ -15,7 +36,7 @@ services:
       - ./minio_data:/data
     networks:
       - parus_net
-      
+
   ollama:
     image: ollama/ollama:latest
     container_name: parus_ollama
@@ -32,6 +53,8 @@ services:
               capabilities: [gpu]
     networks:
       - parus_net
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
 
 networks:
   parus_net:
