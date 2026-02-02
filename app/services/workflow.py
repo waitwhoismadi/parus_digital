@@ -6,40 +6,34 @@ from langgraph.graph import END, StateGraph
 from langchain_community.chat_models import ChatOllama
 from langchain_core.prompts import PromptTemplate
 from loguru import logger
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.services.sql_agent import SQLService
 from app.services.analytics import PythonExecutorService
 from app.core.config import settings
-from app.db.base import async_session_maker
+from app.db.base import async_session_maker  # Импортируем фабрику сессий
 
-# --- 1. Определение состояния (СНАЧАЛА) ---
+# --- 1. Определение состояния ---
 class GraphState(TypedDict):
-    """
-    Состояние, передаваемое между узлами графа.
-    """
-    question: str                # Исходный вопрос пользователя
-    session_id: str              # ID сессии
+    question: str            # Вопрос пользователя
+    user_id: int             # ID пользователя (нужен для памяти)
+    session_id: str          # (Опционально)
     
-    # Классификация
-    intent: Optional[str]        # 'sql', 'python', 'general'
+    intent: Optional[str]    # Классификация
     
-    # Данные для SQL ветки
-    sql_query: Optional[str]     # Сгенерированный SQL
-    sql_result: Optional[str]    # Результат выборки из БД
+    sql_query: Optional[str]
+    sql_result: Optional[str]
     
-    # Данные для Python ветки
-    python_code: Optional[str]   # Сгенерированный Python код
-    plot_base64: Optional[str]   # График (если есть)
+    python_code: Optional[str]
+    plot_base64: Optional[str]
     
-    # Итоговый ответ
-    final_answer: Optional[str]  # Текст для отправки пользователю
-    messages: Annotated[list[BaseMessage], operator.add] # История
+    final_answer: Optional[str]
+    messages: Annotated[list[BaseMessage], operator.add]
 
 # --- 2. Узлы (Nodes) ---
 
 async def router_node(state: GraphState):
     """Определяет маршрут: sql, python или general"""
-    # format="json" форсирует JSON output в Qwen/Llama
     llm = ChatOllama(
         model=settings.OLLAMA_MODEL, 
         base_url=settings.OLLAMA_BASE_URL, 
@@ -48,22 +42,30 @@ async def router_node(state: GraphState):
     
     prompt = PromptTemplate.from_template(
         """
-        Ты — маршрутизатор запросов. Твоя задача — классифицировать вопрос пользователя в одну из трех категорий:
+        Ты — маршрутизатор запросов для ИИ-аналитика. 
+        Твоя задача — классифицировать вопрос пользователя в одну из трех категорий.
         
-        1. "sql" — если вопрос касается справочных данных, списков проектов, сотрудников, планов, которые лежат в базе данных (НЕ в файлах).
-        2. "python" — если вопрос касается АНАЛИЗА загруженных Excel файлов, построения графиков, расчетов, сравнения версий.
-        3. "general" — приветствия, общие вопросы, или если непонятно.
+        КРИТЕРИИ КЛАССИФИКАЦИИ:
+        
+        1. "sql" — Вопросы о СТРУКТУРЕ компании, списках сотрудников, справочниках (то, что лежит в базе данных).
+        
+        2. "python" — АНАЛИТИКА ФАЙЛОВ и ГРАФИКИ.
+           ВАЖНО: Сюда относятся любые уточнения по графикам:
+           - "Сделай красным", "Поменяй цвет", "Добавь подписи".
+           - "А что насчет марта?", "Убеди фильтр".
+           - Любые команды по визуализации ("Построй", "Нарисуй").
+           
+        3. "general" — Приветствия ("Привет", "Как дела") или вопросы, не связанные с данными (погода, философия).
 
         Вопрос: {question}
 
-        ВЕРНИ JSON: {{"intent": "выбранная_категория"}}
+        ВЕРНИ СТРОГО JSON: {{"intent": "выбранная_категория"}}
         """
     )
     
     chain = prompt | llm
     try:
         response = await chain.ainvoke({"question": state["question"]})
-        # Иногда LLM возвращает контент в response.content, иногда в response
         content = response.content if hasattr(response, 'content') else str(response)
         data = json.loads(content)
         intent = data.get("intent", "general")
@@ -86,9 +88,11 @@ async def sql_node(state: GraphState):
 
 async def python_node(state: GraphState):
     """Обработка Excel/Python запросов"""
+    # ВАЖНО: Открываем сессию БД здесь, внутри узла
     async with async_session_maker() as session:
         executor = PythonExecutorService(session)
-        response = await executor.run_analysis(state["question"])
+        # Передаем user_id, чтобы сервис мог подтянуть историю переписки
+        response = await executor.run_analysis(state["question"], state["user_id"])
     
     return {
         "python_code": response.executed_code,
@@ -98,22 +102,16 @@ async def python_node(state: GraphState):
 
 async def general_node(state: GraphState):
     """Болталка"""
-    # Используем temperature=0.3, чтобы он был менее "креативным" и не выдумывал языки
     llm = ChatOllama(
         model=settings.OLLAMA_MODEL, 
         base_url=settings.OLLAMA_BASE_URL,
         temperature=0.3
     )
     
-    from langchain_core.messages import HumanMessage, SystemMessage
-    
-    # Жесткая инструкция
     messages = [
         SystemMessage(content=(
             "Ты — русскоязычный ассистент Parus AI. "
-            "Твоя задача — помогать сотрудникам ПЭО. "
-            "Отвечай СТРОГО на русском языке. "
-            "Никогда не используй китайские иероглифы или английский язык, если тебя об этом прямо не попросили."
+            "Отвечай СТРОГО на русском языке."
         )),
         HumanMessage(content=state["question"])
     ]
@@ -121,22 +119,18 @@ async def general_node(state: GraphState):
     response = await llm.ainvoke(messages)
     return {"final_answer": response.content}
 
-# ...
 # --- 3. Построение графа ---
 
 def build_graph():
     workflow = StateGraph(GraphState)
 
-    # Добавляем узлы
     workflow.add_node("router", router_node)
     workflow.add_node("sql_agent", sql_node)
     workflow.add_node("python_agent", python_node)
     workflow.add_node("general_agent", general_node)
 
-    # Входная точка
     workflow.set_entry_point("router")
 
-    # Условные переходы
     def route_condition(state):
         return state["intent"] + "_agent"
 
@@ -150,12 +144,10 @@ def build_graph():
         }
     )
 
-    # Все агенты завершают работу (идут к END)
     workflow.add_edge("sql_agent", END)
     workflow.add_edge("python_agent", END)
     workflow.add_edge("general_agent", END)
 
     return workflow.compile()
 
-# Инициализация графа (синглтон)
 app_workflow = build_graph()

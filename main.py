@@ -2,31 +2,37 @@ import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from app.core.config import settings
-from app.core.logger import setup_logger # Предполагается настройка loguru
 from app.bot.handlers import router
-from app.bot.middlewares import DbSessionMiddleware
-from app.db.base import init_models # Функция create_all для таблиц
+from app.db.base import init_models
+
+# !!! ВАЖНО !!!
+# Мы должны импортировать модели здесь, чтобы SQLAlchemy "увидела" их 
+# и зарегистрировала в метаданных перед созданием таблиц.
+import app.db.models 
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
 
 async def main():
-    # 1. Настройка логгера
-    setup_logger()
+    # 1. Инициализация моделей БД
+    print("🔄 Connecting to DB and checking tables...")
     
-    # 2. Инициализация БД (создание таблиц если нет)
-    # В проде лучше использовать Alembic миграции
+    # Эта функция теперь увидит ChatHistory, потому что мы сделали импорт выше
     await init_models()
+    
+    print("✅ Database tables are ready!")
 
-    # 3. Инициализация бота
+    # 2. Настройка бота
     bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
     dp = Dispatcher()
-
-    # 4. Подключение Middleware и Роутеров
-    dp.update.middleware(DbSessionMiddleware())
+    
+    # Подключаем роутеры
     dp.include_router(router)
 
-    logging.info("🚀 Parus AI Bot started!")
-    
-    # 5. Запуск Polling
+    # 3. Запуск polling
+    await bot.delete_webhook(drop_pending_updates=True)
     try:
+        print("🚀 Parus AI Bot started polling...")
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
@@ -35,4 +41,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Bot stopped")
+        print("Bot stopped!")

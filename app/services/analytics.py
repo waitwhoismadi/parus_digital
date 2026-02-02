@@ -1,6 +1,5 @@
 import pandas as pd
 import matplotlib
-# Устанавливаем бэкенд Agg СРАЗУ, до импорта pyplot. Это критично для Docker.
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import io
@@ -29,7 +28,7 @@ class PythonExecutorService:
         )
         self.max_retries = 3
 
-    async def run_analysis(self, user_query: str) -> AnalyticsResponse:
+    async def run_analysis(self, user_query: str, user_id: int) -> AnalyticsResponse:
         """Главный метод"""
         files_meta = await self._get_relevant_files_metadata()
         
@@ -71,13 +70,17 @@ class PythonExecutorService:
 
         if not dfs:
             return AnalyticsResponse(answer_text="Ошибка данных", executed_code="", is_error=True)
+        
+        from app.services.memory import MemoryService
+        memory = MemoryService(self.db)
+        history_text = await memory.get_recent_history(user_id)
 
         last_error = None
         code = ""
         
         for attempt in range(self.max_retries):
             try:
-                code = await self._generate_code(user_query, schemas_desc, last_error)
+                code = await self._generate_code(user_query, schemas_desc, history_text, last_error)
                 logger.info(f"--- ATTEMPT {attempt+1} GENERATED CODE ---\n{code}\n----------------")
                 result, plot_b64 = self._execute_safe(code, dfs)
                 
@@ -100,7 +103,7 @@ class PythonExecutorService:
         result = await self.db.execute(select(FileMetadata).order_by(FileMetadata.id.desc()).limit(5))
         return result.scalars().all()
 
-    async def _generate_code(self, query: str, schemas: List[str], error: str = None, previous_code: str = "") -> str:
+    async def _generate_code(self, query: str, schemas: List[str], history: str, error: str = None) -> str:
         
         system_prompt = """
         You are a Senior Python Data Analyst.
@@ -110,18 +113,18 @@ class PythonExecutorService:
 
         USER REQUEST: {input}
 
+        CHAT HISTORY: {history}
+
         TASK: Write Python code (Pandas + Matplotlib) to fulfill the request.
         
         CRITICAL RULES (FOLLOW OR CODE WILL CRASH):
         
-        1. VARIABLE: 
-           - Start with `df = df_X.copy()` (use the correct variable name).
-           - Initialize `final_result = "Data not found"`.
+        1. CONTEXT AWARENESS:
+           - Look at CHAT HISTORY. If user says "Make it green" or "Filter by March", apply this to the PREVIOUSLY generated plot/data if applicable.
+           - If the request is a follow-up, modify the previous logic.
         
-        2. DATA CLEANING: 
-           - Convert ONLY value columns (Months, Quarters) to numeric: 
-             `df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)`
-           - NEVER touch the first column (Text Description).
+        2. VARIABLE: 
+           - Start with `df = df_X.copy()` (use the correct variable name).
 
         3. FILTERING:
            - Filter row: `filtered = df[df['NameCol'].astype(str).str.contains('Term', case=False, na=False)]`
@@ -156,14 +159,18 @@ class PythonExecutorService:
 
         prompt = PromptTemplate(
             template=system_prompt,
-            input_variables=["input", "schemas"]
+            input_variables=["input", "schemas", "history"]
         )
         
         chain = prompt | self.llm
         
         logger.info(f"--- SENDING PROMPT TO LLM ---\nQuestion: {msg}\n----------------")
         
-        response = await chain.ainvoke({"input": msg, "schemas": "\n".join(schemas)})
+        response = await chain.ainvoke({
+            "input": msg, 
+            "schemas": "\n".join(schemas),
+            "history": history
+        })
         return response.content.replace("```python", "").replace("```", "").strip()
 
     def _execute_safe(self, code: str, dfs: Dict[str, pd.DataFrame]):
