@@ -9,7 +9,7 @@ from loguru import logger
 from app.services.ingestion import IngestionService
 from app.services.workflow import app_workflow
 from app.services.memory import MemoryService
-from app.db.base import async_session_maker # Импортируем фабрику сессий
+from app.db.base import async_session_maker 
 
 router = Router()
 
@@ -26,17 +26,18 @@ async def handle_document(message: Message, bot: Bot):
     """Обработка загрузки файлов"""
     doc = message.document
     
-    if not doc.file_name.endswith(('.xlsx', '.csv')):
-        await message.answer("❌ Поддерживаются только .xlsx и .csv файлы.")
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    if not doc.file_name.endswith(('.xlsx', '.csv', '.pdf')):
+        await message.answer("❌ Поддерживаются только файлы: .xlsx, .csv, .pdf")
         return
+    # -------------------------
 
-    status_msg = await message.answer("⏳ Скачиваю и анализирую структуру файла...")
+    status_msg = await message.answer("⏳ Скачиваю и анализирую файл...")
     
     try:
         file_io = await bot.download(doc)
         file_bytes = file_io.read()
 
-        # Создаем сессию только для загрузки
         async with async_session_maker() as session:
             service = IngestionService(session)
             metadata = await service.process_file(file_bytes, doc.file_name)
@@ -44,7 +45,7 @@ async def handle_document(message: Message, bot: Bot):
         await status_msg.edit_text(
             f"✅ *Файл загружен!*\n\n"
             f"📄 Имя: `{metadata.filename}`\n"
-            f"📝 Описание: {metadata.description}"
+            f"📝 Статус: {metadata.description}"
         )
     except Exception as e:
         logger.error(f"Upload error: {e}")

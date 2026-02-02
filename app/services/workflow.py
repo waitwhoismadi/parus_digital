@@ -11,7 +11,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.services.sql_agent import SQLService
 from app.services.analytics import PythonExecutorService
 from app.core.config import settings
-from app.db.base import async_session_maker  # Импортируем фабрику сессий
+from app.db.base import async_session_maker  
+
+from app.services.rag import RAGService
 
 # --- 1. Определение состояния ---
 class GraphState(TypedDict):
@@ -30,10 +32,8 @@ class GraphState(TypedDict):
     final_answer: Optional[str]
     messages: Annotated[list[BaseMessage], operator.add]
 
-# --- 2. Узлы (Nodes) ---
-
 async def router_node(state: GraphState):
-    """Определяет маршрут: sql, python или general"""
+    """Маршрутизатор: SQL, Python, RAG или General"""
     llm = ChatOllama(
         model=settings.OLLAMA_MODEL, 
         base_url=settings.OLLAMA_BASE_URL, 
@@ -42,24 +42,17 @@ async def router_node(state: GraphState):
     
     prompt = PromptTemplate.from_template(
         """
-        Ты — маршрутизатор запросов для ИИ-аналитика. 
-        Твоя задача — классифицировать вопрос пользователя в одну из трех категорий.
+        Классифицируй вопрос пользователя в одну из 4 категорий:
         
-        КРИТЕРИИ КЛАССИФИКАЦИИ:
-        
-        1. "sql" — Вопросы о СТРУКТУРЕ компании, списках сотрудников, справочниках (то, что лежит в базе данных).
-        
-        2. "python" — АНАЛИТИКА ФАЙЛОВ и ГРАФИКИ.
-           ВАЖНО: Сюда относятся любые уточнения по графикам:
-           - "Сделай красным", "Поменяй цвет", "Добавь подписи".
-           - "А что насчет марта?", "Убеди фильтр".
-           - Любые команды по визуализации ("Построй", "Нарисуй").
-           
-        3. "general" — Приветствия ("Привет", "Как дела") или вопросы, не связанные с данными (погода, философия).
+        1. "sql" — Справочные данные о сотрудниках, проектах (из БД).
+        2. "python" — Графики, анализ Excel файлов ("Построй", "Сравни").
+        3. "rag" — Вопросы по ТЕКСТОВЫМ документам (PDF, инструкции, договора, приказы).
+           Примеры: "Как рассчитывается премия?", "Какие штрафы?", "О чем приказ №5?".
+        4. "general" — Приветствия, болтовня.
 
         Вопрос: {question}
 
-        ВЕРНИ СТРОГО JSON: {{"intent": "выбранная_категория"}}
+        ВЕРНИ JSON: {{"intent": "выбранная_категория"}}
         """
     )
     
@@ -70,7 +63,7 @@ async def router_node(state: GraphState):
         data = json.loads(content)
         intent = data.get("intent", "general")
     except Exception as e:
-        logger.error(f"Router parse error: {e}")
+        logger.error(f"Router error: {e}")
         intent = "general"
         
     logger.info(f"Router decision: {intent}")
@@ -100,6 +93,45 @@ async def python_node(state: GraphState):
         "final_answer": response.answer_text
     }
 
+async def rag_node(state: GraphState):
+    """Ищет информацию в документах и формирует ответ"""
+    question = state["question"]
+    
+    async with async_session_maker() as session:
+        rag_service = RAGService(session)
+        # Ищем 3 самых релевантных куска
+        found_chunks = await rag_service.search(question, limit=3)
+    
+    # Если ничего не нашли
+    if not found_chunks:
+        return {"final_answer": "К сожалению, я не нашел информации об этом в загруженных документах."}
+
+    # Формируем контекст для LLM
+    context_text = "\n---\n".join(found_chunks)
+    
+    system_prompt = f"""
+    Ты — эксперт по документации.
+    Используй ТОЛЬКО представленный ниже контекст, чтобы ответить на вопрос пользователя.
+    Если в контексте нет ответа, так и скажи. Не выдумывай факты.
+    
+    КОНТЕКСТ ИЗ ДОКУМЕНТОВ:
+    {context_text}
+    """
+    
+    llm = ChatOllama(
+        model=settings.OLLAMA_MODEL, 
+        base_url=settings.OLLAMA_BASE_URL,
+        temperature=0.2 
+    )
+    
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=question)
+    ]
+    
+    response = await llm.ainvoke(messages)
+    return {"final_answer": response.content}
+
 async def general_node(state: GraphState):
     """Болталка"""
     llm = ChatOllama(
@@ -127,6 +159,7 @@ def build_graph():
     workflow.add_node("router", router_node)
     workflow.add_node("sql_agent", sql_node)
     workflow.add_node("python_agent", python_node)
+    workflow.add_node("rag_agent", rag_node)         # <--- Добавили
     workflow.add_node("general_agent", general_node)
 
     workflow.set_entry_point("router")
@@ -140,12 +173,15 @@ def build_graph():
         {
             "sql_agent": "sql_agent",
             "python_agent": "python_agent",
+            "rag_agent": "rag_agent",        # <--- Добавили путь
             "general_agent": "general_agent"
         }
     )
 
+    # Все идут к выходу
     workflow.add_edge("sql_agent", END)
     workflow.add_edge("python_agent", END)
+    workflow.add_edge("rag_agent", END)
     workflow.add_edge("general_agent", END)
 
     return workflow.compile()
