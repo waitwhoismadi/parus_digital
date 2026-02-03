@@ -1,4 +1,4 @@
-# --- Security (ВАЖНО) ---
+# --- Security ---
 .env
 .env.*
 !.env.example

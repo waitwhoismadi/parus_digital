@@ -7,6 +7,6 @@ class AnalyticsRequest(BaseModel):
 
 class AnalyticsResponse(BaseModel):
     answer_text: str
-    plot_base64: Optional[str] = None # Если был построен график
+    plot_base64: Optional[str] = None 
     executed_code: str
     is_error: bool = False
