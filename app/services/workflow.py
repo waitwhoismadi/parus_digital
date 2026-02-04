@@ -15,7 +15,7 @@ from app.db.base import async_session_maker
 
 from app.services.rag import RAGService
 
-# --- 1. Определение состояния ---
+# --- Определение состояния ---
 class GraphState(TypedDict):
     question: str            # Вопрос пользователя
     user_id: int             # ID пользователя (нужен для памяти)
@@ -81,10 +81,8 @@ async def sql_node(state: GraphState):
 
 async def python_node(state: GraphState):
     """Обработка Excel/Python запросов"""
-    # ВАЖНО: Открываем сессию БД здесь, внутри узла
     async with async_session_maker() as session:
         executor = PythonExecutorService(session)
-        # Передаем user_id, чтобы сервис мог подтянуть историю переписки
         response = await executor.run_analysis(state["question"], state["user_id"])
     
     return {
@@ -99,14 +97,11 @@ async def rag_node(state: GraphState):
     
     async with async_session_maker() as session:
         rag_service = RAGService(session)
-        # Ищем 3 самых релевантных куска
         found_chunks = await rag_service.search(question, limit=3)
     
-    # Если ничего не нашли
     if not found_chunks:
         return {"final_answer": "К сожалению, я не нашел информации об этом в загруженных документах."}
 
-    # Формируем контекст для LLM
     context_text = "\n---\n".join(found_chunks)
     
     system_prompt = f"""
@@ -151,7 +146,7 @@ async def general_node(state: GraphState):
     response = await llm.ainvoke(messages)
     return {"final_answer": response.content}
 
-# --- 3. Построение графа ---
+# --- Построение графа ---
 
 def build_graph():
     workflow = StateGraph(GraphState)
@@ -159,7 +154,7 @@ def build_graph():
     workflow.add_node("router", router_node)
     workflow.add_node("sql_agent", sql_node)
     workflow.add_node("python_agent", python_node)
-    workflow.add_node("rag_agent", rag_node)         # <--- Добавили
+    workflow.add_node("rag_agent", rag_node)       
     workflow.add_node("general_agent", general_node)
 
     workflow.set_entry_point("router")
@@ -173,7 +168,7 @@ def build_graph():
         {
             "sql_agent": "sql_agent",
             "python_agent": "python_agent",
-            "rag_agent": "rag_agent",        # <--- Добавили путь
+            "rag_agent": "rag_agent",        
             "general_agent": "general_agent"
         }
     )
