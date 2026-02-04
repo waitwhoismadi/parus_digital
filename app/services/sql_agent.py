@@ -1,118 +1,95 @@
-from langchain_community.utilities import SQLDatabase
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_community.chat_models import ChatOllama
-from langchain.chains import create_sql_query_chain
-from langchain_core.prompts import PromptTemplate
+from langchain.prompts import PromptTemplate
+from loguru import logger
 from app.core.config import settings
 
 class SQLService:
-    def __init__(self):
-        sync_db_url = str(settings.DATABASE_URL).replace("+asyncpg", "")
-        
-        self.db = SQLDatabase.from_uri(sync_db_url)
-        
+    def __init__(self, session: AsyncSession):
+        self.session = session
         self.llm = ChatOllama(
-            model=settings.OLLAMA_MODEL,
+            model=settings.OLLAMA_MODEL, 
             base_url=settings.OLLAMA_BASE_URL,
-            temperature=0
+            temperature=0 # Важно: 0 креативности, только логика
         )
 
-    async def generate_response(self, question: str) -> dict:
-        """
-        Генерирует SQL, исполняет и формирует ответ.
-        """
-        # Генерация SQL
-        chain = create_sql_query_chain(self.llm, self.db)
-        generated_sql = await chain.ainvoke({"question": question})
+    async def generate_response(self, user_question: str) -> dict:
+        """Главный метод: Вопрос -> SQL -> Данные -> Ответ"""
         
-        # --- БЛОК ОЧИСТКИ (FIX) ---
-        # Если есть блок markdown ```sql ... ```, берем то, что внутри
-        if "```" in generated_sql:
-            # Иногда пишет ```sql, иногда просто ```
-            generated_sql = generated_sql.split("```")[1].replace("sql", "")
-            
-        # Если модель повторила "SQLQuery:", обрезаем всё до этого момента
-        if "SQLQuery:" in generated_sql:
-            generated_sql = generated_sql.split("SQLQuery:")[1]
-
-        # Самая надежная защита: ищем первое слово SELECT
-        # и берем всё, начиная с него
-        select_index = generated_sql.upper().find("SELECT")
-        if select_index != -1:
-            clean_sql = generated_sql[select_index:].strip()
-        else:
-            # Если SELECT не найден, скорее всего модель отказалась писать SQL
-            return {
-                "sql": "Not generated",
-                "result": "",
-                "answer": generated_sql # Возвращаем текст ошибки от модели
-            }
-        # ---------------------------
+        # 1. Генерируем SQL
+        sql_query = await self._text_to_sql(user_question)
         
-        # Исполнение SQL
+        # !!! ЛОГИРОВАНИЕ !!!
+        logger.info(f"🔎 [SQL Agent] Question: {user_question}")
+        logger.info(f"📝 [SQL Agent] Generated SQL: {sql_query}")
+        
+        if "NO_SQL" in sql_query or not sql_query:
+             return {"answer": "Для этого вопроса не нужно искать данные в базе."}
+        
+        # 2. Выполняем SQL
         try:
-            result_str = self.db.run(clean_sql)
-        except Exception as e:
-            return {
-                "sql": clean_sql,
-                "error": str(e),
-                "answer": f"Ошибка выполнения SQL: {e}"
-            }
-
-        # Интерпретация результата
-        interpret_prompt = PromptTemplate.from_template(
-            """
-            Вопрос: {question}
-            SQL запрос: {query}
-            Результат из БД: {result}
+            result = await self.session.execute(text(sql_query))
+            rows = result.fetchall()
+            columns = result.keys()
             
-            Дай краткий ответ на русском языке.
-            """
-        )
-        interpret_chain = interpret_prompt | self.llm
-        final_answer = await interpret_chain.ainvoke({
-            "question": question, 
-            "query": clean_sql, 
-            "result": result_str
-        })
+            # Логируем, что нашли
+            logger.info(f"📊 [SQL Agent] Found {len(rows)} rows: {rows}")
 
+            # Превращаем результат в строку для LLM
+            if not rows:
+                data_str = "Результат запроса пуст (No data found)."
+            else:
+                data_str = f"Columns: {list(columns)}\nData:\n"
+                for row in rows:
+                    data_str += str(row) + "\n"
+                
+        except Exception as e:
+            logger.error(f"❌ [SQL Agent] Execution error: {e}")
+            return {"answer": f"Ошибка выполнения SQL запроса. Попробуйте переформулировать.", "sql": sql_query}
+
+        # 3. Формируем человеческий ответ
+        final_answer = await self._data_to_text(user_question, data_str)
         return {
-            "sql": clean_sql,
-            "result": result_str,
-            "answer": final_answer.content
+            "sql": sql_query,
+            "result": data_str,
+            "answer": final_answer
         }
-    
+
     async def _text_to_sql(self, question: str) -> str:
-        # Обновленная схема
+        # Максимально подробная схема
         schema = """
-        Table: users
-        Columns: id, first_name, last_name, middle_name, email, birth_date, phone_number, telegram_id, position_id, company_id
+        1. table "users" (Сотрудники):
+           - id, first_name, last_name (Фамилия), middle_name
+           - email, phone_number
+           - position_id (link to positions), company_id (link to companies)
+
+        2. table "companies" (Компании):
+           - id, name (Название компании)
         
-        Table: positions
-        Columns: id, name, role
-        
-        Table: companies
-        Columns: id, name, parent_company_id
-        
-        Relationships:
-        - users.position_id -> positions.id
-        - users.company_id -> companies.id
-        - companies.parent_company_id -> companies.id
+        3. table "positions" (Должности):
+           - id, name (Название должности)
+
+        Связи:
+        - users.company_id = companies.id
+        - users.position_id = positions.id
         """
         
         prompt = PromptTemplate.from_template(
             """
-            Ты — SQL эксперт. Твоя задача — написать SQL запрос (PostgreSQL) для ответа на вопрос пользователя.
+            Ты — Senior SQL Developer. Напиши PostgreSQL запрос для ответа на вопрос.
             
-            Схема базы данных:
+            Схема БД:
             {schema}
             
             Вопрос: {question}
             
-            ПРАВИЛА:
-            1. Возвращай ТОЛЬКО код SQL.
-            2. Используй JOIN, чтобы получить названия должностей и компаний, а не только их ID.
-             Например: SELECT u.last_name, p.name FROM users u JOIN positions p ON u.position_id = p.id
-            3. Для поиска имен используй ILIKE.
+            ЖЕСТКИЕ ПРАВИЛА:
+            1. Возвращай ТОЛЬКО SQL код. Никаких объяснений.
+            2. Для поиска по тексту (имя, фамилия, название) ВСЕГДА используй ILIKE и символы %.
+               Пример: WHERE u.last_name ILIKE '%Пушпаков%'
+            3. ВСЕГДА делай JOIN с таблицами companies и positions, чтобы вывести названия, а не ID.
+            4. Если имя написано на русском, ищи в базе на русском.
             
             SQL Query:
             """
@@ -121,5 +98,21 @@ class SQLService:
         chain = prompt | self.llm
         response = await chain.ainvoke({"schema": schema, "question": question})
         
+        # Чистим мусор (markdown)
         sql = response.content.replace("```sql", "").replace("```", "").strip()
         return sql
+
+    async def _data_to_text(self, question: str, data: str) -> str:
+        prompt = PromptTemplate.from_template(
+            """
+            Вопрос: {question}
+            Данные из БД:
+            {data}
+            
+            Если данных нет, ответь: "К сожалению, информации о сотруднике не найдено."
+            Если данные есть, ответь кратко и четко на русском языке.
+            """
+        )
+        chain = prompt | self.llm
+        response = await chain.ainvoke({"question": question, "data": data})
+        return response.content
