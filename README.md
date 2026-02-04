@@ -22,8 +22,7 @@
 * **LLM Orchestration**: LangChain, LangGraph
 * **LLM Engine**: Ollama (Model: Qwen 2.5)
 * **Data Processing**: Pandas, Matplotlib, OpenPyXL
-* **Storage**:
-* **MinIO** (S3-compatible) — хранение файлов.
+* **Storage**: MinIO (S3-compatible) — хранение файлов.
 * **PostgreSQL** — хранение метаданных и истории.
 
 
