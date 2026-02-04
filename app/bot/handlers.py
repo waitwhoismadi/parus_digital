@@ -12,6 +12,7 @@ from app.services.workflow import app_workflow
 from app.services.memory import MemoryService
 from app.db.base import async_session_maker
 from app.db.models import FileMetadata, ChatHistory
+from app.bot.middlewares import AuthMiddleware 
 
 router = Router()
 
@@ -26,6 +27,8 @@ main_kb = ReplyKeyboardMarkup(
 )
 
 # --- ХЕНДЛЕРЫ ---
+
+router.message.middleware(AuthMiddleware())
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
