@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, BigInteger, Text, DateTime, JSON, ForeignKey, func
+from sqlalchemy import Column, Integer, String, BigInteger, Text, DateTime, JSON, ForeignKey, func, Date, Boolean
 from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector  
 from app.db.base import Base
@@ -38,3 +38,39 @@ class DocumentChunk(Base):
     embedding = Column(Vector(768))
 
     file = relationship("FileMetadata", back_populates="chunks")
+
+class Position(Base):
+    __tablename__ = "positions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)  # Например: "Главный экономист"
+    role = Column(String, nullable=False)  # Например: "admin", "user"
+
+class Company(Base):
+    __tablename__ = "companies"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    parent_company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
+    
+    children = relationship("Company")
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    first_name = Column(String, nullable=False)
+    last_name = Column(String, nullable=False)
+    middle_name = Column(String, nullable=True)
+    email = Column(String, unique=True, index=True)
+    birth_date = Column(Date, nullable=True)
+    phone_number = Column(String, nullable=True)
+    hashed_password = Column(String, nullable=False) 
+    photo_url = Column(String, nullable=True)
+    telegram_id = Column(BigInteger, unique=True, nullable=True, index=True)
+
+    position_id = Column(Integer, ForeignKey("positions.id"))
+    company_id = Column(Integer, ForeignKey("companies.id"))
+
+    position = relationship("Position")
+    company = relationship("Company")

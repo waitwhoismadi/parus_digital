@@ -80,3 +80,46 @@ class SQLService:
             "result": result_str,
             "answer": final_answer.content
         }
+    
+    async def _text_to_sql(self, question: str) -> str:
+        # Обновленная схема
+        schema = """
+        Table: users
+        Columns: id, first_name, last_name, middle_name, email, birth_date, phone_number, telegram_id, position_id, company_id
+        
+        Table: positions
+        Columns: id, name, role
+        
+        Table: companies
+        Columns: id, name, parent_company_id
+        
+        Relationships:
+        - users.position_id -> positions.id
+        - users.company_id -> companies.id
+        - companies.parent_company_id -> companies.id
+        """
+        
+        prompt = PromptTemplate.from_template(
+            """
+            Ты — SQL эксперт. Твоя задача — написать SQL запрос (PostgreSQL) для ответа на вопрос пользователя.
+            
+            Схема базы данных:
+            {schema}
+            
+            Вопрос: {question}
+            
+            ПРАВИЛА:
+            1. Возвращай ТОЛЬКО код SQL.
+            2. Используй JOIN, чтобы получить названия должностей и компаний, а не только их ID.
+             Например: SELECT u.last_name, p.name FROM users u JOIN positions p ON u.position_id = p.id
+            3. Для поиска имен используй ILIKE.
+            
+            SQL Query:
+            """
+        )
+        
+        chain = prompt | self.llm
+        response = await chain.ainvoke({"schema": schema, "question": question})
+        
+        sql = response.content.replace("```sql", "").replace("```", "").strip()
+        return sql
